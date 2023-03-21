@@ -12,7 +12,7 @@ server端同步路径与client一致
 
 ## install
 ```go
-go get 
+git clone https://github.com/Madou-Shinni/file-sync.git
 ```
 
 ## 快速开始
