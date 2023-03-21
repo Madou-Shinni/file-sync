@@ -1,8 +1,8 @@
 package initialization
 
 import (
-	"file-sync/client/conf"
 	"fmt"
+	"github.com/Madou-Shinni/file-sync/client/conf"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
 )
