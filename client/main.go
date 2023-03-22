@@ -28,9 +28,8 @@ const (
 )
 
 var (
-	localDir      string              // 本地目录
-	uploadedFiles sync.Map            // 用于记录已上传文件的 MD5 值的 map
-	ch            = make(chan string) // 文件读取的消息管道
+	localDir      string   // 本地目录
+	uploadedFiles sync.Map // 用于记录已上传文件的 MD5 值的 map
 )
 
 func main() {
@@ -47,18 +46,6 @@ func main() {
 		},
 		Action: func(c *cli.Context) error {
 			localDir = c.String("src")
-
-			go func() {
-				// 从管道中读取需要写入的文本内容
-				for line := range ch {
-					// 缓存已同步文件hash
-					err := writeFileHash(line)
-					if err != nil {
-						log.Printf("writeFileHash(line):%v", err)
-						continue
-					}
-				}
-			}()
 
 			// 创建已同步文件的记录文本
 			tools.CreateFile(FileHashTxt)
@@ -93,7 +80,12 @@ func main() {
 
 // 定时同步文件
 func timedSynchronization() {
-	var err error
+	var (
+		err              error
+		wg               sync.WaitGroup             // 确保函数退出前所有goroutine都结束，避免内存泄漏
+		concurrencyLimit = make(chan struct{}, 200) // 限制goroutine数量
+	)
+
 	// 获取本地目录中的所有文件
 	err = filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -105,85 +97,17 @@ func timedSynchronization() {
 			return nil
 		}
 
-		// 计算文件的 MD5 值
-		md5sum, err := tools.GetFileMD5(path)
-		if err != nil {
-			return err
-		}
+		wg.Add(1)
+		concurrencyLimit <- struct{}{}
+		// 并发上传
+		go func() {
+			defer wg.Done()
+			defer func() { <-concurrencyLimit }()
 
-		// 取文件名
-		key := info.Name() + "\t" + md5sum
-
-		// 如果文件已经上传过，则跳过
-		if _, ok := uploadedFiles.Load(key); ok {
-			log.Printf("skipping %s because it has already been uploaded\n", path)
-			return nil
-		}
-
-		// 打开本地文件
-		localFile, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer localFile.Close()
-
-		// 设置请求参数
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		if err != nil {
-			return err
-		}
-		writer.WriteField("code", Secret)
-		writer.WriteField("dst", path)
-		writer.WriteField("hash", md5sum)
-		formFile, err := writer.CreateFormFile("file", path)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(formFile, localFile)
-		if err != nil {
-			return err
-		}
-		err = writer.Close()
-		if err != nil {
-			return err
-		}
-
-		// 创建 HTTP 请求
-		req, err := http.NewRequest("POST", conf.Conf.UrlPrefix+"/file-sync", body)
-		if err != nil {
-			return err
-		}
-
-		// 设置请求头 req.Header.Set("Content-Type","multipart/form-data")
-		req.Header.Add("Content-Type", writer.FormDataContentType())
-		// 执行 HTTP 请求
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		// 检查 HTTP 响应码
-		if resp.StatusCode == 600 {
-			// 文件已存在
-			log.Printf("skipping %s because it has already been uploaded\n", path)
-			return nil
-		}
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("uploading %s failed with status code %d", path, resp.StatusCode)
-		}
-
-		// 将文件的 MD5 值添加到 map 中，表示已经上传过
-		uploadedFiles.Store(key, true)
-
-		// 持久化，将文件hash持久化txt文本
-		err = writeFileHash(key)
-		if err != nil {
-			return err
-		}
-		// 打印成功信息
-		log.Printf("uploaded %s suceess", path)
+			if err := uploadFiles(path); err != nil {
+				log.Printf("failed to upload %s: %v", path, err)
+			}
+		}()
 
 		return nil
 	})
@@ -191,6 +115,93 @@ func timedSynchronization() {
 	if err != nil {
 		log.Println(err)
 	}
+
+	wg.Wait()
+}
+
+// 上传文件
+func uploadFiles(path string) error {
+	// 计算文件的 MD5 值
+	md5sum, err := tools.GetFileMD5(path)
+	if err != nil {
+		return err
+	}
+
+	// 取文件名
+	key := fmt.Sprintf("%s\t%s", filepath.Base(path), md5sum)
+
+	// 如果文件已经上传过，则跳过
+	if _, ok := uploadedFiles.Load(key); ok {
+		log.Printf("skipping %s because it has already been uploaded\n", path)
+		return nil
+	}
+
+	// 打开本地文件
+	localFile, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer localFile.Close()
+
+	// 设置请求参数
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err != nil {
+		return err
+	}
+	writer.WriteField("code", Secret)
+	writer.WriteField("dst", path)
+	writer.WriteField("hash", md5sum)
+	formFile, err := writer.CreateFormFile("file", path)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(formFile, localFile)
+	if err != nil {
+		return err
+	}
+	err = writer.Close()
+	if err != nil {
+		return err
+	}
+
+	// 创建 HTTP 请求
+	req, err := http.NewRequest("POST", conf.Conf.UrlPrefix+"/file-sync", body)
+	if err != nil {
+		return err
+	}
+
+	// 设置请求头 req.Header.Set("Content-Type","multipart/form-data")
+	req.Header.Add("Content-Type", writer.FormDataContentType())
+	// 执行 HTTP 请求
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 检查 HTTP 响应码
+	if resp.StatusCode == 600 {
+		// 文件已存在
+		log.Printf("skipping %s because it has already been uploaded\n", path)
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("uploading %s failed with status code %d", path, resp.StatusCode)
+	}
+
+	// 将文件的 MD5 值添加到 map 中，表示已经上传过
+	uploadedFiles.Store(key, true)
+
+	// 持久化，将文件hash持久化txt文本
+	err = writeFileHash(key)
+	if err != nil {
+		return err
+	}
+	// 打印成功信息
+	log.Printf("uploaded %s suceess", path)
+
+	return nil
 }
 
 // 加载已同步文件hash列表

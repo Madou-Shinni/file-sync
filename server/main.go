@@ -33,8 +33,8 @@ func main() {
 
 	r.POST("/file-sync", verifyCode(), uploadHandle)
 
-	go func() {
-		// 从管道中读取数据并处理
+	// 从管道中读取数据并处理
+	for i := 0; i < runtime.NumCPU(); i++ {
 		go func() {
 			// 从管道中读取需要写入的文本内容
 			for line := range ch {
@@ -46,7 +46,7 @@ func main() {
 				}
 			}
 		}()
-	}()
+	}
 
 	// 创建已同步文件的记录文本
 	tools.CreateFile(FileHashTxt)
@@ -63,9 +63,27 @@ func main() {
 	select {
 	case <-signals:
 		// 释放资源
+		Close()
 		fmt.Println("[file-sync] 程序关闭，释放资源")
 		return
 	}
+}
+
+// Close 释放资源
+func Close() {
+	close(ch)
+
+	// 等待上传goroutine完成
+	wg := sync.WaitGroup{}
+	wg.Add(runtime.NumCPU())
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go func() {
+			defer wg.Done()
+			for range ch {
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // 验证code
