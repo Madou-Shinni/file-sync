@@ -82,7 +82,6 @@ func main() {
 func timedSynchronization() {
 	var (
 		err              error
-		wg               sync.WaitGroup             // 确保函数退出前所有goroutine都结束，避免内存泄漏
 		concurrencyLimit = make(chan struct{}, 200) // 限制goroutine数量
 	)
 
@@ -97,11 +96,9 @@ func timedSynchronization() {
 			return nil
 		}
 
-		wg.Add(1)
 		concurrencyLimit <- struct{}{}
 		// 并发上传
 		go func(path string) {
-			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
 
 			if err := uploadFiles(path); err != nil {
@@ -116,7 +113,6 @@ func timedSynchronization() {
 		log.Println(err)
 	}
 
-	wg.Wait()
 }
 
 // 上传文件
