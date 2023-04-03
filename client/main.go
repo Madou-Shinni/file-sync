@@ -100,14 +100,14 @@ func timedSynchronization() {
 		wg.Add(1)
 		concurrencyLimit <- struct{}{}
 		// 并发上传
-		go func() {
+		go func(path string) {
 			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
 
 			if err := uploadFiles(path); err != nil {
 				log.Printf("failed to upload %s: %v", path, err)
 			}
-		}()
+		}(path)
 
 		return nil
 	})
